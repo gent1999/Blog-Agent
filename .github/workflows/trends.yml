@@ -1,0 +1,19 @@
+name: Rap Trends Agent
+
+on:
+  schedule:
+    - cron: "0 16-23,0-3 * * *" # hourly, 11am–10pm America/New_York
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Run agent
+        run: node agent.js
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
