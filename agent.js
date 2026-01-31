@@ -1,24 +1,34 @@
-// agent.js (RSS -> Discord)
+// agent.js (RSS -> Discord)  |  hourly headlines for rap/hip-hop
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 if (!WEBHOOK_URL) throw new Error("Missing DISCORD_WEBHOOK_URL");
 
 const now = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
 
+// HipHopDX feed is dead (410). Using reliable feeds + Google News RSS queries.
 const FEEDS = [
-  { name: "HipHopDX", url: "https://hiphopdx.com/feed" },
+  { name: "XXL", url: "https://www.xxlmag.com/feed/" },
   { name: "Complex (Music)", url: "https://www.complex.com/music/rss" },
-  { name: "XXL", url: "https://www.xxlmag.com/feed/" }
+
+  // Google News RSS (very reliable)
+  { name: "Google News: Hip Hop", url: "https://news.google.com/rss/search?q=hip+hop+when:1d&hl=en-US&gl=US&ceid=US:en" },
+  { name: "Google News: Rap", url: "https://news.google.com/rss/search?q=rap+music+when:1d&hl=en-US&gl=US&ceid=US:en" },
+  { name: "Google News: Album Sales", url: "https://news.google.com/rss/search?q=first+week+sales+rapper+when:7d&hl=en-US&gl=US&ceid=US:en" }
+
+  // Optional (uncomment to try; may block bots sometimes)
+  // { name: "HotNewHipHop", url: "https://www.hotnewhiphop.com/rss.xml" },
 ];
 
 async function fetchText(url) {
   const res = await fetch(url, {
-    headers: { "User-Agent": "rap-trends-agent/1.0 (+github actions)" }
+    headers: {
+      "User-Agent": "rap-trends-agent/1.0 (+github actions)"
+    }
   });
   if (!res.ok) throw new Error(`${url} -> ${res.status} ${res.statusText}`);
   return res.text();
 }
 
-// Super simple RSS parser (no deps): grabs <item> blocks and reads <title>/<link>/<pubDate>
+// Minimal RSS parser (no deps): parses <item> blocks and reads title/link/pubDate
 function parseRss(xml, sourceName) {
   const items = [];
   const itemBlocks = xml.match(/<item[\s\S]*?<\/item>/g) || [];
@@ -28,19 +38,20 @@ function parseRss(xml, sourceName) {
       (block.match(/<title><!\[CDATA\[([\s\S]*?)\]\]><\/title>/i)?.[1] ||
         block.match(/<title>([\s\S]*?)<\/title>/i)?.[1] ||
         "")
+        .replace(/&#39;/g, "'")
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, "&")
         .trim();
 
-    let link =
-      (block.match(/<link>([\s\S]*?)<\/link>/i)?.[1] || "").trim();
+    let link = (block.match(/<link>([\s\S]*?)<\/link>/i)?.[1] || "").trim();
 
-    // Some feeds put the real URL in <guid>
-    if (!link || link.startsWith("http") === false) {
+    // some feeds use <guid> as the real URL
+    if (!link || !link.startsWith("http")) {
       const guid = (block.match(/<guid[^>]*>([\s\S]*?)<\/guid>/i)?.[1] || "").trim();
       if (guid.startsWith("http")) link = guid;
     }
 
-    const pubDate =
-      (block.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1] || "").trim();
+    const pubDate = (block.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1] || "").trim();
 
     if (!title || !link) continue;
 
@@ -62,10 +73,18 @@ function dedupe(items) {
   return out;
 }
 
+function sortNewestFirst(items) {
+  return items.sort((a, b) => {
+    const da = a.pubDate ? Date.parse(a.pubDate) : 0;
+    const db = b.pubDate ? Date.parse(b.pubDate) : 0;
+    return db - da;
+  });
+}
+
 function formatMessage(top) {
   const lines = [];
   lines.push(`**Rap / Hip-Hop Headlines — ${now}**`);
-  lines.push(`Top pulls from HipHopDX + Complex + XXL`);
+  lines.push("Sources: XXL + Complex + Google News");
   lines.push("");
 
   top.forEach((t, i) => {
@@ -75,9 +94,8 @@ function formatMessage(top) {
   });
 
   lines.push("Reply with a number and I’ll turn it into a post caption + take.");
-  const msg = lines.join("\n");
 
-  // Discord content limit safety
+  const msg = lines.join("\n");
   return msg.length > 1900 ? msg.slice(0, 1900) + "\n…" : msg;
 }
 
@@ -87,6 +105,7 @@ async function postToDiscord(content) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ content })
   });
+
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Discord webhook failed: ${res.status} ${res.statusText}\n${text}`);
@@ -98,20 +117,13 @@ async function main() {
 
   for (const feed of FEEDS) {
     const xml = await fetchText(feed.url);
-    const items = parseRss(xml, feed.name).slice(0, 10);
+    const items = parseRss(xml, feed.name).slice(0, 12);
     all.push(...items);
   }
 
-  const merged = dedupe(all);
-
-  // Light “trending” sort: newest pubDate first if present
-  merged.sort((a, b) => {
-    const da = a.pubDate ? Date.parse(a.pubDate) : 0;
-    const db = b.pubDate ? Date.parse(b.pubDate) : 0;
-    return db - da;
-  });
-
+  const merged = sortNewestFirst(dedupe(all));
   const top = merged.slice(0, 8);
+
   if (!top.length) throw new Error("No items parsed from RSS feeds.");
 
   await postToDiscord(formatMessage(top));
