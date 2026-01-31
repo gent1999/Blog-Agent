@@ -1,4 +1,4 @@
-// agent.js (RSS -> Discord) | single clean message, minimal embeds
+// agent.js (RSS -> Discord) | single clean digest, NO embeds, auto-fit under 2000 chars
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 if (!WEBHOOK_URL) throw new Error("Missing DISCORD_WEBHOOK_URL");
 
@@ -73,44 +73,60 @@ function sortNewestFirst(items) {
 function cleanTitle(s) {
   return s
     .replace(/\s+/g, " ")
-    .replace(/\s-\s.*$/, "") // trims " - BBC" style endings sometimes
+    .replace(/\s-\s(BBC|CNN|Complex|XXL|E! News|People|Rolling Stone|The Fader|Billboard)\s*$/i, "")
     .trim();
 }
 
-// Trick to reduce embed spam: wrap URL in < >
-// Still clickable, but usually no preview.
-function noEmbedUrl(url) {
-  return `<${url}>`;
+// Discord markdown link: [title](url)
+// IMPORTANT: escape ] and ) so it doesn’t break formatting
+function mdLink(title, url) {
+  const safeTitle = title.replace(/\]/g, "\\]").replace(/\)/g, "\\)");
+  return `[${safeTitle}](${url})`;
 }
 
-function formatDigest(top, failures) {
-  const lines = [];
-  lines.push(`**Rap / Hip-Hop Trend Digest — ${now}**`);
-  lines.push(`Sources: XXL + Google News`);
-  if (failures.length) lines.push(`_Skipped: ${failures.map(f => f.name).join(", ")}_`);
-  lines.push("");
+function isJunk(it) {
+  const t = it.title.toLowerCase();
+  const bad = [
+    "country", "taylor swift", "bruce springsteen", "jewelry", "necklace",
+    "rock pendant", "unisex", "fashion", "watch", "stock", "politics"
+  ];
+  return bad.some((b) => t.includes(b));
+}
 
-  top.forEach((t, i) => {
-    const title = cleanTitle(t.title);
-    lines.push(`${i + 1}. **${title}**`);
-    lines.push(`${noEmbedUrl(t.link)} _(via ${t.source})_`);
-    lines.push("");
-  });
+// Build message and keep adding items until close to limit
+function buildDigest(items, failures) {
+  const header = [
+    `**Rap / Hip-Hop Trend Digest — ${now}**`,
+    `Sources: XXL + Google News`,
+    failures.length ? `_Skipped: ${failures.map(f => f.name).join(", ")}_` : "",
+    "",
+    "**Top topics:**"
+  ].filter(Boolean).join("\n");
 
-  lines.push("Reply with a number and I’ll write the caption + take.");
+  const footer = "\n\nReply with a number and I’ll write the caption + take.";
 
-  const msg = lines.join("\n");
-  return msg.length > 1900 ? msg.slice(0, 1900) + "\n…" : msg;
+  let msg = header;
+  let count = 0;
+
+  for (let i = 0; i < items.length; i++) {
+    const line = `\n${count + 1}. ${mdLink(cleanTitle(items[i].title), items[i].link)} _(via ${items[i].source})_`;
+    // if adding this line would exceed 2000, stop
+    if ((msg + line + footer).length > 1950) break;
+    msg += line;
+    count++;
+  }
+
+  msg += footer;
+  return msg;
 }
 
 async function postToDiscord(content) {
   const res = await fetch(WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    // IMPORTANT: disable embeds
     body: JSON.stringify({
       content,
-      flags: 1 << 2 // SUPPRESS_EMBEDS
+      flags: 1 << 2 // SUPPRESS_EMBEDS (no link previews)
     })
   });
 
@@ -127,26 +143,20 @@ async function main() {
   for (const feed of FEEDS) {
     try {
       const xml = await fetchText(feed.url);
-      all.push(...parseRss(xml, feed.name).slice(0, 12));
+      all.push(...parseRss(xml, feed.name).slice(0, 20));
     } catch (e) {
       failures.push({ name: feed.name, err: String(e.message || e) });
     }
   }
 
-  const merged = sortNewestFirst(dedupe(all));
+  const merged = sortNewestFirst(dedupe(all)).filter((it) => !isJunk(it));
 
-  // Quick junk filter (tune later)
-  const filtered = merged.filter((it) => {
-    const t = it.title.toLowerCase();
-    const bad = ["bruce springsteen", "country", "taylor swift", "rock pendant", "necklace", "unisex", "jewelry"];
-    if (bad.some((b) => t.includes(b))) return false;
-    return true;
-  });
+  if (!merged.length) throw new Error("No items parsed from RSS feeds.");
 
-  const top = filtered.slice(0, 10);
-  if (!top.length) throw new Error("No items parsed from RSS feeds.");
+  // Try up to 30 candidates, but message builder will auto-stop at char limit
+  const digest = buildDigest(merged.slice(0, 30), failures);
 
-  await postToDiscord(formatDigest(top, failures));
+  await postToDiscord(digest);
 }
 
 main().catch((e) => {
