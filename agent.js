@@ -1,4 +1,4 @@
-// agent.js (RSS -> Discord) | single clean digest, NO embeds, auto-fit under 2000 chars
+// agent.js | Discord WEBHOOK EMBED digest (one message, rich embed card)
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 if (!WEBHOOK_URL) throw new Error("Missing DISCORD_WEBHOOK_URL");
 
@@ -71,62 +71,48 @@ function sortNewestFirst(items) {
 }
 
 function cleanTitle(s) {
-  return s
-    .replace(/\s+/g, " ")
-    .replace(/\s-\s(BBC|CNN|Complex|XXL|E! News|People|Rolling Stone|The Fader|Billboard)\s*$/i, "")
-    .trim();
-}
-
-// Discord markdown link: [title](url)
-// IMPORTANT: escape ] and ) so it doesn’t break formatting
-function mdLink(title, url) {
-  const safeTitle = title.replace(/\]/g, "\\]").replace(/\)/g, "\\)");
-  return `[${safeTitle}](${url})`;
+  return s.replace(/\s+/g, " ").trim();
 }
 
 function isJunk(it) {
   const t = it.title.toLowerCase();
   const bad = [
     "country", "taylor swift", "bruce springsteen", "jewelry", "necklace",
-    "rock pendant", "unisex", "fashion", "watch", "stock", "politics"
+    "rock pendant", "unisex", "fashion", "watch", "politics"
   ];
   return bad.some((b) => t.includes(b));
 }
 
-// Build message and keep adding items until close to limit
-function buildDigest(items, failures) {
-  const header = [
-    `**Rap / Hip-Hop Trend Digest — ${now}**`,
-    `Sources: XXL + Google News`,
-    failures.length ? `_Skipped: ${failures.map(f => f.name).join(", ")}_` : "",
-    "",
-    "**Top topics:**"
-  ].filter(Boolean).join("\n");
+// Discord embed limits:
+// - up to 25 fields
+// - field name 256 chars, value 1024 chars
+// - embed description 4096 chars
+function buildEmbed(top, failures) {
+  const fields = top.slice(0, 10).map((item, idx) => ({
+    name: `${idx + 1}. ${cleanTitle(item.title).slice(0, 240)}`,
+    value: `[Open link](${item.link}) • _${item.source}_`,
+    inline: false
+  }));
 
-  const footer = "\n\nReply with a number and I’ll write the caption + take.";
+  const skipped = failures.length ? `Skipped: ${failures.map(f => f.name).join(", ")}` : "";
 
-  let msg = header;
-  let count = 0;
-
-  for (let i = 0; i < items.length; i++) {
-    const line = `\n${count + 1}. ${mdLink(cleanTitle(items[i].title), items[i].link)} _(via ${items[i].source})_`;
-    // if adding this line would exceed 2000, stop
-    if ((msg + line + footer).length > 1950) break;
-    msg += line;
-    count++;
-  }
-
-  msg += footer;
-  return msg;
+  return {
+    // color is optional; remove if you don’t care
+    // color: 0x5865F2,
+    title: "Rap / Hip-Hop Trend Digest",
+    description: skipped ? `**${now}**\n${skipped}` : `**${now}**`,
+    fields,
+    footer: { text: "Reply with a number and I’ll write the caption + take." }
+  };
 }
 
-async function postToDiscord(content) {
+async function postToDiscordEmbed(embed) {
   const res = await fetch(WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      content,
-      flags: 1 << 2 // SUPPRESS_EMBEDS (no link previews)
+      content: "",      // keep blank (optional)
+      embeds: [embed]   // THIS creates the rich embed card
     })
   });
 
@@ -143,20 +129,20 @@ async function main() {
   for (const feed of FEEDS) {
     try {
       const xml = await fetchText(feed.url);
-      all.push(...parseRss(xml, feed.name).slice(0, 20));
+      all.push(...parseRss(xml, feed.name).slice(0, 25));
     } catch (e) {
       failures.push({ name: feed.name, err: String(e.message || e) });
     }
   }
 
   const merged = sortNewestFirst(dedupe(all)).filter((it) => !isJunk(it));
-
   if (!merged.length) throw new Error("No items parsed from RSS feeds.");
 
-  // Try up to 30 candidates, but message builder will auto-stop at char limit
-  const digest = buildDigest(merged.slice(0, 30), failures);
+  // pick top N; embed handles layout
+  const top = merged.slice(0, 10);
 
-  await postToDiscord(digest);
+  const embed = buildEmbed(top, failures);
+  await postToDiscordEmbed(embed);
 }
 
 main().catch((e) => {
