@@ -1,14 +1,11 @@
-// agent.js (RSS -> Discord) | hourly rap/hip-hop headlines, ONE MESSAGE PER ITEM
+// agent.js (RSS -> Discord) | single clean message, minimal embeds
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 if (!WEBHOOK_URL) throw new Error("Missing DISCORD_WEBHOOK_URL");
 
 const now = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
 
-// Reliable sources (Complex/HipHopDX feeds were dead in your tests)
 const FEEDS = [
   { name: "XXL", url: "https://www.xxlmag.com/feed/" },
-
-  // Google News RSS queries (reliable)
   { name: "Google News: Hip Hop", url: "https://news.google.com/rss/search?q=hip+hop+when:1d&hl=en-US&gl=US&ceid=US:en" },
   { name: "Google News: Rap", url: "https://news.google.com/rss/search?q=rap+music+when:1d&hl=en-US&gl=US&ceid=US:en" },
   { name: "Google News: Album Sales", url: "https://news.google.com/rss/search?q=first+week+sales+rapper+when:7d&hl=en-US&gl=US&ceid=US:en" },
@@ -23,7 +20,6 @@ async function fetchText(url) {
   return res.text();
 }
 
-// Minimal RSS parser (no deps): parses <item> blocks and reads title/link/pubDate
 function parseRss(xml, sourceName) {
   const items = [];
   const itemBlocks = xml.match(/<item[\s\S]*?<\/item>/g) || [];
@@ -40,7 +36,6 @@ function parseRss(xml, sourceName) {
 
     let link = (block.match(/<link>([\s\S]*?)<\/link>/i)?.[1] || "").trim();
 
-    // Some feeds use <guid> as the real URL
     if (!link || !link.startsWith("http")) {
       const guid = (block.match(/<guid[^>]*>([\s\S]*?)<\/guid>/i)?.[1] || "").trim();
       if (guid.startsWith("http")) link = guid;
@@ -49,7 +44,6 @@ function parseRss(xml, sourceName) {
     const pubDate = (block.match(/<pubDate>([\s\S]*?)<\/pubDate>/i)?.[1] || "").trim();
 
     if (!title || !link) continue;
-
     items.push({ source: sourceName, title, link, pubDate });
   }
 
@@ -76,31 +70,54 @@ function sortNewestFirst(items) {
   });
 }
 
-async function postToDiscord(content) {
-  const trimmed = content.length > 1900 ? content.slice(0, 1900) + "\n…" : content;
+function cleanTitle(s) {
+  return s
+    .replace(/\s+/g, " ")
+    .replace(/\s-\s.*$/, "") // trims " - BBC" style endings sometimes
+    .trim();
+}
 
+// Trick to reduce embed spam: wrap URL in < >
+// Still clickable, but usually no preview.
+function noEmbedUrl(url) {
+  return `<${url}>`;
+}
+
+function formatDigest(top, failures) {
+  const lines = [];
+  lines.push(`**Rap / Hip-Hop Trend Digest — ${now}**`);
+  lines.push(`Sources: XXL + Google News`);
+  if (failures.length) lines.push(`_Skipped: ${failures.map(f => f.name).join(", ")}_`);
+  lines.push("");
+
+  top.forEach((t, i) => {
+    const title = cleanTitle(t.title);
+    lines.push(`${i + 1}. **${title}**`);
+    lines.push(`${noEmbedUrl(t.link)} _(via ${t.source})_`);
+    lines.push("");
+  });
+
+  lines.push("Reply with a number and I’ll write the caption + take.");
+
+  const msg = lines.join("\n");
+  return msg.length > 1900 ? msg.slice(0, 1900) + "\n…" : msg;
+}
+
+async function postToDiscord(content) {
   const res = await fetch(WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content: trimmed })
+    // IMPORTANT: disable embeds
+    body: JSON.stringify({
+      content,
+      flags: 1 << 2 // SUPPRESS_EMBEDS
+    })
   });
 
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Discord webhook failed: ${res.status} ${res.statusText}\n${text}`);
   }
-}
-
-function formatSingleMessage(item, index, failuresCount) {
-  const lines = [];
-  lines.push(`**Rap / Hip-Hop Headline #${index} — ${now}**`);
-  lines.push(`**${item.title}**`);
-  lines.push(item.link);
-  lines.push(`_(via ${item.source})_`);
-  if (index === 1 && failuresCount > 0) {
-    lines.push(`_Note: skipped ${failuresCount} feed(s) this run._`);
-  }
-  return lines.join("\n");
 }
 
 async function main() {
@@ -110,37 +127,26 @@ async function main() {
   for (const feed of FEEDS) {
     try {
       const xml = await fetchText(feed.url);
-      const items = parseRss(xml, feed.name).slice(0, 12);
-      all.push(...items);
+      all.push(...parseRss(xml, feed.name).slice(0, 12));
     } catch (e) {
       failures.push({ name: feed.name, err: String(e.message || e) });
-      // keep going — don’t fail the whole run
     }
   }
 
   const merged = sortNewestFirst(dedupe(all));
 
-  // Optional: quick junk filter (keeps rap-ish titles more often)
+  // Quick junk filter (tune later)
   const filtered = merged.filter((it) => {
     const t = it.title.toLowerCase();
-    const bad = ["bruce springsteen", "country", "taylor swift", "grammy awards", "rock pendant", "necklace", "fashion"];
+    const bad = ["bruce springsteen", "country", "taylor swift", "rock pendant", "necklace", "unisex", "jewelry"];
     if (bad.some((b) => t.includes(b))) return false;
     return true;
   });
 
-  const top = filtered.slice(0, 8);
-  if (!top.length) {
-    throw new Error(
-      `No items parsed from any RSS feeds. Failures: ${failures.map(f => f.name).join(", ")}`
-    );
-  }
+  const top = filtered.slice(0, 10);
+  if (!top.length) throw new Error("No items parsed from RSS feeds.");
 
-  // Send one message per headline (with a small delay to avoid rate limits)
-  for (let i = 0; i < top.length; i++) {
-    const msg = formatSingleMessage(top[i], i + 1, failures.length);
-    await postToDiscord(msg);
-    await new Promise((r) => setTimeout(r, 800));
-  }
+  await postToDiscord(formatDigest(top, failures));
 }
 
 main().catch((e) => {
