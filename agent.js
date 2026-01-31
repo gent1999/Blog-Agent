@@ -1,19 +1,18 @@
-// agent.js (RSS -> Discord) | hourly rap/hip-hop headlines
+// agent.js (RSS -> Discord) | hourly rap/hip-hop headlines, ONE MESSAGE PER ITEM
 const WEBHOOK_URL = process.env.DISCORD_WEBHOOK_URL;
 if (!WEBHOOK_URL) throw new Error("Missing DISCORD_WEBHOOK_URL");
 
 const now = new Date().toLocaleString("en-US", { timeZone: "America/New_York" });
 
-// Using reliable feeds + Google News RSS queries.
-// (HipHopDX feed is 410, Complex rss was 404)
+// Reliable sources (Complex/HipHopDX feeds were dead in your tests)
 const FEEDS = [
   { name: "XXL", url: "https://www.xxlmag.com/feed/" },
 
-  // Google News RSS (reliable)
+  // Google News RSS queries (reliable)
   { name: "Google News: Hip Hop", url: "https://news.google.com/rss/search?q=hip+hop+when:1d&hl=en-US&gl=US&ceid=US:en" },
   { name: "Google News: Rap", url: "https://news.google.com/rss/search?q=rap+music+when:1d&hl=en-US&gl=US&ceid=US:en" },
   { name: "Google News: Album Sales", url: "https://news.google.com/rss/search?q=first+week+sales+rapper+when:7d&hl=en-US&gl=US&ceid=US:en" },
-  { name: "Google News: Rap beef", url: "https://news.google.com/rss/search?q=rap+beef+when:7d&hl=en-US&gl=US&ceid=US:en" },
+  { name: "Google News: Rap beef", url: "https://news.google.com/rss/search?q=rap+beef+when:7d&hl=en-US&gl=US&ceid=US:en" }
 ];
 
 async function fetchText(url) {
@@ -77,39 +76,31 @@ function sortNewestFirst(items) {
   });
 }
 
-function formatMessage(top, failures) {
-  const lines = [];
-  lines.push(`**Rap / Hip-Hop Headlines — ${now}**`);
-  lines.push("Sources: XXL + Google News");
-  lines.push("");
-
-  top.forEach((t, i) => {
-    lines.push(`${i + 1}. **${t.title}**`);
-    lines.push(`${t.link} _(via ${t.source})_`);
-    lines.push("");
-  });
-
-  if (failures.length) {
-    lines.push(`_Skipped ${failures.length} feed(s) this run._`);
-  }
-
-  lines.push("Reply with a number and I’ll turn it into a post caption + take.");
-
-  const msg = lines.join("\n");
-  return msg.length > 1900 ? msg.slice(0, 1900) + "\n…" : msg;
-}
-
 async function postToDiscord(content) {
+  const trimmed = content.length > 1900 ? content.slice(0, 1900) + "\n…" : content;
+
   const res = await fetch(WEBHOOK_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ content })
+    body: JSON.stringify({ content: trimmed })
   });
 
   if (!res.ok) {
     const text = await res.text();
     throw new Error(`Discord webhook failed: ${res.status} ${res.statusText}\n${text}`);
   }
+}
+
+function formatSingleMessage(item, index, failuresCount) {
+  const lines = [];
+  lines.push(`**Rap / Hip-Hop Headline #${index} — ${now}**`);
+  lines.push(`**${item.title}**`);
+  lines.push(item.link);
+  lines.push(`_(via ${item.source})_`);
+  if (index === 1 && failuresCount > 0) {
+    lines.push(`_Note: skipped ${failuresCount} feed(s) this run._`);
+  }
+  return lines.join("\n");
 }
 
 async function main() {
@@ -123,20 +114,33 @@ async function main() {
       all.push(...items);
     } catch (e) {
       failures.push({ name: feed.name, err: String(e.message || e) });
-      // continue to next feed instead of failing the whole run
+      // keep going — don’t fail the whole run
     }
   }
 
   const merged = sortNewestFirst(dedupe(all));
-  const top = merged.slice(0, 8);
 
+  // Optional: quick junk filter (keeps rap-ish titles more often)
+  const filtered = merged.filter((it) => {
+    const t = it.title.toLowerCase();
+    const bad = ["bruce springsteen", "country", "taylor swift", "grammy awards", "rock pendant", "necklace", "fashion"];
+    if (bad.some((b) => t.includes(b))) return false;
+    return true;
+  });
+
+  const top = filtered.slice(0, 8);
   if (!top.length) {
     throw new Error(
       `No items parsed from any RSS feeds. Failures: ${failures.map(f => f.name).join(", ")}`
     );
   }
 
-  await postToDiscord(formatMessage(top, failures));
+  // Send one message per headline (with a small delay to avoid rate limits)
+  for (let i = 0; i < top.length; i++) {
+    const msg = formatSingleMessage(top[i], i + 1, failures.length);
+    await postToDiscord(msg);
+    await new Promise((r) => setTimeout(r, 800));
+  }
 }
 
 main().catch((e) => {
